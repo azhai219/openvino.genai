@@ -591,6 +591,10 @@ public:
         return m_block_size;
     }
 
+    size_t get_num_layers() const {
+        return m_num_layers;
+    }
+
     /**
      * Frees a number of blocks with highest logical index from all sequences within a sequence group.
      * @param sequence_group The sequence group to free blocks from.

@@ -187,6 +187,10 @@ def get_scheduler_config_genai(config_data, config_name="CB config"):
                     crush_config_kwargs['anchor_point_mode'] = getattr(openvino_genai.KVCrushAnchorPointMode, crush_config_kwargs['anchor_point_mode'])
                 cache_eviction_kwargs["kvcrush_config"] = openvino_genai.KVCrushConfig(**crush_config_kwargs)
 
+            if "adaptive_rkv_config" in cache_eviction_kwargs.keys() and isinstance(cache_eviction_kwargs["adaptive_rkv_config"], dict):
+                arkv_config_kwargs = cache_eviction_kwargs["adaptive_rkv_config"]
+                cache_eviction_kwargs["adaptive_rkv_config"] = openvino_genai.AdaptiveRKVConfig(**arkv_config_kwargs)
+
             scheduler_config.use_cache_eviction = True
             scheduler_config.cache_eviction_config = openvino_genai.CacheEvictionConfig(**cache_eviction_kwargs)
             log.info("Cache Eviction mode ON")

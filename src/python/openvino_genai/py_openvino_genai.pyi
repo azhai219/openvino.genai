@@ -483,7 +483,7 @@ class CacheEvictionConfig:
     aggregation_mode: AggregationMode
     apply_rotation: bool
     kvcrush_config: KVCrushConfig
-    def __init__(self, start_size: typing.SupportsInt, recent_size: typing.SupportsInt, max_cache_size: typing.SupportsInt, aggregation_mode: AggregationMode, apply_rotation: bool = False, snapkv_window_size: typing.SupportsInt = 8, kvcrush_config: typing.Any = None) -> None:
+    def __init__(self, start_size: typing.SupportsInt, recent_size: typing.SupportsInt, max_cache_size: typing.SupportsInt, aggregation_mode: AggregationMode, apply_rotation: bool = False, snapkv_window_size: typing.SupportsInt = 8, kvcrush_config: typing.Any = None, adaptive_rkv_config: typing.Any = None) -> None:
         ...
     def get_evictable_size(self) -> int:
         ...

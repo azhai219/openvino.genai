@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <numeric>
 #include <vector>
 
 #include "openvino/runtime/intel_gpu/properties.hpp"
@@ -345,7 +346,9 @@ private:
                         scheduler_output.m_xattention_stride = m_config.sparse_attention_config.xattention_stride;
 
                         scheduler_output.m_adaptive_rkv_start_size = m_config.cache_eviction_config.get_start_size();
-                        scheduler_output.m_adaptive_rkv_evictable_sizes[seq_id] = _schedule_adaptive_rkv_evictable_size(sequence_group);
+                        size_t evictable_size = _schedule_adaptive_rkv_evictable_size(sequence_group);
+                        scheduler_output.m_adaptive_rkv_evictable_sizes[seq_id] = evictable_size;
+                        _populate_adaptive_rkv_diversity_block_sets(scheduler_output, seq_id, evictable_size, sequence_group);
                     }
                 }
 
@@ -420,7 +423,9 @@ private:
                         scheduler_output.m_xattention_stride = m_config.sparse_attention_config.xattention_stride;
 
                         scheduler_output.m_adaptive_rkv_start_size = m_config.cache_eviction_config.get_start_size();
-                        scheduler_output.m_adaptive_rkv_evictable_sizes[seq_id] = _schedule_adaptive_rkv_evictable_size(sequence_group);
+                        size_t evictable_size = _schedule_adaptive_rkv_evictable_size(sequence_group);
+                        scheduler_output.m_adaptive_rkv_evictable_sizes[seq_id] = evictable_size;
+                        _populate_adaptive_rkv_diversity_block_sets(scheduler_output, seq_id, evictable_size, sequence_group);
                     }
 
 
@@ -513,7 +518,9 @@ private:
                         scheduler_output.m_xattention_stride = m_config.sparse_attention_config.xattention_stride;
 
                         scheduler_output.m_adaptive_rkv_start_size = m_config.cache_eviction_config.get_start_size();
-                        scheduler_output.m_adaptive_rkv_evictable_sizes[seq_id] = _schedule_adaptive_rkv_evictable_size(sequence_group);
+                        size_t evictable_size = _schedule_adaptive_rkv_evictable_size(sequence_group);
+                        scheduler_output.m_adaptive_rkv_evictable_sizes[seq_id] = evictable_size;
+                        _populate_adaptive_rkv_diversity_block_sets(scheduler_output, seq_id, evictable_size, sequence_group);
                     }
 
                     // update "is_prompt" flag
@@ -630,6 +637,40 @@ private:
         OPENVINO_ASSERT(sequence_group->get_num_logical_blocks() * get_block_size() >= non_evictable_size);
 
         return sequence_group->get_num_logical_blocks() * get_block_size() - non_evictable_size;
+    }
+
+    // Populate diversity block set indices for a sequence.
+    // When evictable_size > 0, the diversity block set contains all logical block indices of the
+    // sequence so that the executor kernel can look up physical blocks covering both the start area
+    // and the evictable area. When evictable_size == 0, an empty entry is added so that the
+    // model_runner can find all running sequences in the map.
+    void _populate_adaptive_rkv_diversity_block_sets(Output& scheduler_output, uint64_t seq_id, size_t evictable_size, SequenceGroup::Ptr sequence_group) {
+        if (!(m_config.use_cache_eviction && m_config.cache_eviction_config.aggregation_mode == AggregationMode::ADAPTIVE_RKV)) {
+            return;
+        }
+
+        size_t num_layers = m_block_manager->get_num_layers();
+
+        // Initialize the per-layer vector on first use
+        if (scheduler_output.m_adaptive_rkv_diversity_block_sets_for_each_layer_per_sequence.empty()) {
+            scheduler_output.m_adaptive_rkv_diversity_block_sets_for_each_layer_per_sequence.resize(num_layers);
+        }
+
+        if (evictable_size == 0) {
+            // Add empty entries so model_runner can find this seq_id in the map
+            for (size_t layer_idx = 0; layer_idx < num_layers; layer_idx++) {
+                scheduler_output.m_adaptive_rkv_diversity_block_sets_for_each_layer_per_sequence[layer_idx][seq_id] = {};
+            }
+            return;
+        }
+
+        size_t num_logical_blocks = sequence_group->get_num_logical_blocks();
+        for (size_t layer_idx = 0; layer_idx < num_layers; layer_idx++) {
+            auto& block_map = scheduler_output.m_adaptive_rkv_diversity_block_sets_for_each_layer_per_sequence[layer_idx];
+            std::vector<size_t> logical_indices(num_logical_blocks);
+            std::iota(logical_indices.begin(), logical_indices.end(), 0);
+            block_map[seq_id] = std::move(logical_indices);
+        }
     }
 };
 

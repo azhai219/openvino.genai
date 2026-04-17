@@ -8,7 +8,7 @@ from pathlib import Path
 import datasets
 from tqdm import tqdm
 
-from openvino_genai import ContinuousBatchingPipeline, GenerationConfig, CacheEvictionConfig, AggregationMode
+from openvino_genai import ContinuousBatchingPipeline, GenerationConfig, CacheEvictionConfig, AggregationMode, AdaptiveRKVConfig
 
 from utils.ov_genai_pipelines import PipelineType, generate_and_compare
 from utils.constants import get_default_llm_properties
@@ -40,6 +40,16 @@ class CacheOptTestStruct:
 
 SHORT_CACHE_EVICTION_CONFIG = CacheEvictionConfig(start_size=32, recent_size=32, max_cache_size=96, aggregation_mode=AggregationMode.NORM_SUM)
 LONGBENCH_CACHE_EVICTION_CONFIG = CacheEvictionConfig(start_size=32, recent_size=128, max_cache_size=672, aggregation_mode=AggregationMode.NORM_SUM)
+SHORT_ADAPTIVE_RKV_EVICTION_CONFIG = CacheEvictionConfig(
+    start_size=32, recent_size=32, max_cache_size=96,
+    aggregation_mode=AggregationMode.ADAPTIVE_RKV,
+    snapkv_window_size=0,
+    adaptive_rkv_config=AdaptiveRKVConfig(attention_mass=0.9, window_size=8))
+LONGBENCH_ADAPTIVE_RKV_EVICTION_CONFIG = CacheEvictionConfig(
+    start_size=32, recent_size=128, max_cache_size=672,
+    aggregation_mode=AggregationMode.ADAPTIVE_RKV,
+    snapkv_window_size=0,
+    adaptive_rkv_config=AdaptiveRKVConfig(attention_mass=0.9, window_size=8))
 
 @pytest.mark.skipif(
     sys.platform in ("win32", "darwin"),
@@ -69,6 +79,22 @@ LONGBENCH_CACHE_EVICTION_CONFIG = CacheEvictionConfig(start_size=32, recent_size
     CacheOptTestStruct(test_id="gen_longer_than_eviction_arena",
                        prompt_file="short_prompts.txt", max_new_tokens=160, num_kv_blocks=500, use_cache_eviction=True,
                        cache_eviction_config=SHORT_CACHE_EVICTION_CONFIG,
+                       similarity_threshold=0.94,
+                       max_cache_usage_optimization_ratio=1.4,
+                       avg_cache_usage_optimization_ratio=1.1),
+
+    # adaptive RKV: prompts + generation length are longer than the eviction arena
+    CacheOptTestStruct(test_id="adaptive_rkv_prompts_longer_than_eviction_arena",
+                       prompt_file="long_prompts.txt", max_new_tokens=128, num_kv_blocks=500, use_cache_eviction=True,
+                       cache_eviction_config=SHORT_ADAPTIVE_RKV_EVICTION_CONFIG,
+                       similarity_threshold=0.8,
+                       max_cache_usage_optimization_ratio=2.0,
+                       avg_cache_usage_optimization_ratio=1.7),
+
+    # adaptive RKV: short prompts, long generation - eviction expected
+    CacheOptTestStruct(test_id="adaptive_rkv_gen_longer_than_eviction_arena",
+                       prompt_file="short_prompts.txt", max_new_tokens=160, num_kv_blocks=500, use_cache_eviction=True,
+                       cache_eviction_config=SHORT_ADAPTIVE_RKV_EVICTION_CONFIG,
                        similarity_threshold=0.94,
                        max_cache_usage_optimization_ratio=1.4,
                        avg_cache_usage_optimization_ratio=1.1),
@@ -164,6 +190,7 @@ scheduler_params_list = [
     ({"num_kv_blocks": 0, "cache_size": 0, "dynamic_split_fuse": True, "enable_prefix_caching": False}, get_greedy_seq_len_300()),
     ({"num_kv_blocks": 0, "cache_size": 0, "dynamic_split_fuse": False, "max_num_batched_tokens": 600, "enable_prefix_caching": False}, get_beam_search_seq_len_300()),
     ({"num_kv_blocks": 0, "cache_size": 0, "dynamic_split_fuse": False, "max_num_batched_tokens": 600, "use_cache_eviction": True, "cache_eviction_config": SHORT_CACHE_EVICTION_CONFIG}, get_greedy_seq_len_300()),
+    ({"num_kv_blocks": 0, "cache_size": 0, "dynamic_split_fuse": False, "max_num_batched_tokens": 600, "use_cache_eviction": True, "cache_eviction_config": SHORT_ADAPTIVE_RKV_EVICTION_CONFIG}, get_greedy_seq_len_300()),
 ]
 @pytest.mark.parametrize("params", scheduler_params_list)
 def test_dynamic_memory_allocation(params):
@@ -192,7 +219,8 @@ class LongBenchTestData:
     ],
     ids=["samsum", "trec"],
 )
-def test_optimized_generation_longbench(test_struct):
+@pytest.mark.parametrize("use_adaptive_rkv", [False, True], ids=["norm_sum", "adaptive_rkv"])
+def test_optimized_generation_longbench(test_struct, use_adaptive_rkv):
     seqs_per_request = 16
     device = "CPU"
     num_kv_blocks = 1000 if device == "CPU" else 500
@@ -202,7 +230,7 @@ def test_optimized_generation_longbench(test_struct):
 
     scheduler_config_opt = get_scheduler_config(num_kv_blocks)
     scheduler_config_opt.use_cache_eviction = True
-    scheduler_config_opt.cache_eviction_config = LONGBENCH_CACHE_EVICTION_CONFIG
+    scheduler_config_opt.cache_eviction_config = LONGBENCH_ADAPTIVE_RKV_EVICTION_CONFIG if use_adaptive_rkv else LONGBENCH_CACHE_EVICTION_CONFIG
 
     scheduler_config_opt.use_sparse_attention = True
 

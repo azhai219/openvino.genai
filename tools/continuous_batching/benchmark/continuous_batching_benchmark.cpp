@@ -117,7 +117,7 @@ Dataset filtered_dataset(const std::string& models_path, const std::string& data
         if (input_len < 4 || output_len < 4)
             continue;
         // Prune too long sequences.
-        if (input_len > max_input_len || (input_len + output_len) > 2048)
+        if (input_len > max_input_len || output_len > max_output_len)
             continue;
 
         ov::genai::GenerationConfig greedy_search;
@@ -444,7 +444,13 @@ int main(int argc, char* argv[]) try {
     ("cache_size", "Size of memory used for KV cache in GB. Default: 16", cxxopts::value<size_t>()->default_value("16"))
     ("device", "Target device to run the model. Default: CPU", cxxopts::value<std::string>()->default_value("CPU"))
     ("device_config", "Plugin configuration JSON. Example: '{\"MODEL_DISTRIBUTION_POLICY\":\"TENSOR_PARALLEL\",\"PERF_COUNT\":true}' Default: {\"PERF_COUNT\":true}", cxxopts::value<std::string>()->default_value("{\"PERF_COUNT\":true}"))
-    ("use_cache_eviction", "Whether to use cache eviction", cxxopts::value<bool>()->default_value("false"))
+    ("use_cache_eviction", "Whether to use cache eviction (true/false)", cxxopts::value<std::string>()->default_value("false"))
+    ("aggregation_mode", "Cache eviction aggregation mode: NORM_SUM, SUM, or ADAPTIVE_RKV", cxxopts::value<std::string>()->default_value("NORM_SUM"))
+    ("eviction_start_size", "Cache eviction: number of start tokens to keep", cxxopts::value<size_t>()->default_value("32"))
+    ("eviction_recent_size", "Cache eviction: number of recent tokens to keep", cxxopts::value<size_t>()->default_value("128"))
+    ("eviction_max_cache_size", "Cache eviction: max cache size per sequence in tokens", cxxopts::value<size_t>()->default_value("1024"))
+    ("attention_mass", "Adaptive RKV attention mass threshold (0.0-1.0)", cxxopts::value<double>()->default_value("0.85"))
+    ("adaptive_rkv_window_size", "Adaptive RKV score aggregation window size", cxxopts::value<size_t>()->default_value("8"))
     ("h,help", "Print usage");
 
     cxxopts::ParseResult result;
@@ -473,7 +479,14 @@ int main(int argc, char* argv[]) try {
     const std::string device = result["device"].as<std::string>();
     const std::string device_config = result["device_config"].as<std::string>();
     const size_t cache_size = result["cache_size"].as<size_t>();
-    const bool use_cache_eviction = result["use_cache_eviction"].as<bool>();
+    const std::string use_cache_eviction_str = result["use_cache_eviction"].as<std::string>();
+    const bool use_cache_eviction = (use_cache_eviction_str == "true" || use_cache_eviction_str == "1");
+    const std::string aggregation_mode_str = result["aggregation_mode"].as<std::string>();
+    const size_t eviction_start_size = result["eviction_start_size"].as<size_t>();
+    const size_t eviction_recent_size = result["eviction_recent_size"].as<size_t>();
+    const size_t eviction_max_cache_size = result["eviction_max_cache_size"].as<size_t>();
+    const double attention_mass = result["attention_mass"].as<double>();
+    const size_t adaptive_rkv_window_size = result["adaptive_rkv_window_size"].as<size_t>();
 
     bool is_speculative_decoding_enabled = !draft_model_path.empty();
 
@@ -488,7 +501,18 @@ int main(int argc, char* argv[]) try {
     scheduler_config.max_num_seqs = 256; // not used if dynamic_split_fuse=True
     if (use_cache_eviction) {
         scheduler_config.use_cache_eviction = true;
-        scheduler_config.cache_eviction_config = ov::genai::CacheEvictionConfig(32, 32, 128, ov::genai::AggregationMode::NORM_SUM, false, 8, ov::genai::KVCrushConfig(0, ov::genai::KVCrushAnchorPointMode::MEAN));
+        ov::genai::AggregationMode agg_mode = ov::genai::AggregationMode::NORM_SUM;
+        if (aggregation_mode_str == "SUM") {
+            agg_mode = ov::genai::AggregationMode::SUM;
+        } else if (aggregation_mode_str == "ADAPTIVE_RKV") {
+            agg_mode = ov::genai::AggregationMode::ADAPTIVE_RKV;
+        }
+        size_t snapkv_window = (agg_mode == ov::genai::AggregationMode::ADAPTIVE_RKV) ? 0 : 8;
+        scheduler_config.cache_eviction_config = ov::genai::CacheEvictionConfig(
+            eviction_start_size, eviction_recent_size, eviction_max_cache_size,
+            agg_mode, false, snapkv_window,
+            ov::genai::KVCrushConfig(0, ov::genai::KVCrushAnchorPointMode::MEAN),
+            ov::genai::AdaptiveRKVConfig(attention_mass, adaptive_rkv_window_size));
     }
 
     std::cout << "Benchmarking parameters: " << std::endl;

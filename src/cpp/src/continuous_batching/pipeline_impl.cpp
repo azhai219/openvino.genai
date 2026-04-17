@@ -816,6 +816,10 @@ void ContinuousBatchingPipeline::ContinuousBatchingImpl::_maybe_evict_cache_bloc
             auto it = block_diversities.find(seq_id);
             if (it != block_diversities.end()) {
                 cache_eviction_algo.register_block_diversity(it->second);
+            } else {
+                // Diversity was not computed this step (e.g. not on a block boundary),
+                // skip eviction for this sequence until diversity data is available
+                continue;
             }
         }
 

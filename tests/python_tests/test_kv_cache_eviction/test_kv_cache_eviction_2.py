@@ -108,3 +108,91 @@ def test_kvcrush_vs_snapkv_baseline_longbench(subset):
     del model_cb_kvcrush
     import gc
     gc.collect()
+
+
+# Adaptive RKV test configurations
+ADAPTIVE_RKV_SNAPKV_BASELINE_CONFIG = CacheEvictionConfig(
+    start_size=32,
+    recent_size=128,
+    max_cache_size=960,
+    aggregation_mode=AggregationMode.NORM_SUM,
+    apply_rotation=False,
+    snapkv_window_size=8,
+)
+
+ADAPTIVE_RKV_CONFIG = CacheEvictionConfig(
+    start_size=32,
+    recent_size=128,
+    max_cache_size=960,
+    aggregation_mode=AggregationMode.ADAPTIVE_RKV,
+    apply_rotation=False,
+    snapkv_window_size=0,
+)
+ADAPTIVE_RKV_CONFIG.adaptive_rkv_config.attention_mass = 0.9
+ADAPTIVE_RKV_CONFIG.adaptive_rkv_config.window_size = 8
+
+
+@pytest.mark.parametrize("subset", ["samsum", "trec", "qasper"])
+def test_adaptive_rkv_vs_snapkv_baseline_longbench(subset):
+    """Test that Adaptive RKV performs equal or better than SnapKV baseline on LongBench datasets."""
+    device = "CPU"
+    seqs_per_request = 16
+    num_kv_blocks = 1000 if device == "CPU" else 500
+    model_id = "HuggingFaceTB/SmolLM2-135M-Instruct"
+    models_path = download_and_convert_model(model_id).models_path
+
+    scheduler_config_baseline = get_scheduler_config(num_kv_blocks)
+    scheduler_config_baseline.use_cache_eviction = True
+    scheduler_config_baseline.cache_eviction_config = ADAPTIVE_RKV_SNAPKV_BASELINE_CONFIG
+
+    scheduler_config_arkv = get_scheduler_config(num_kv_blocks)
+    scheduler_config_arkv.use_cache_eviction = True
+    scheduler_config_arkv.cache_eviction_config = ADAPTIVE_RKV_CONFIG
+
+    model_cb_baseline = ContinuousBatchingPipeline(models_path, scheduler_config_baseline, device, {}, get_default_llm_properties())
+    model_cb_arkv = ContinuousBatchingPipeline(models_path, scheduler_config_arkv, device, {}, get_default_llm_properties())
+
+    model_name = "/".join(models_path.parts[-2:])
+    max_new_tokens = dataset2maxlen[subset]
+
+    generation_config = GenerationConfig()
+    generation_config.num_return_sequences = 1
+    generation_config.max_new_tokens = max_new_tokens
+    generation_config.apply_chat_template = False
+
+    data = datasets.load_dataset("zai-org/LongBench", subset, split="test[:16]", revision="8cbd1")
+    with tqdm(total=len(data)) as progress_bar:
+        batch = []
+        baseline_answers = []
+        arkv_answers = []
+        for p_idx, data_sample in enumerate(data):
+            prompt = preprocess_prompt(data_sample, subset, model_name)
+            progress_bar.update(1)
+            batch.append(prompt)
+            baseline_answers.append({"answers": data_sample["answers"], "all_classes": data_sample["all_classes"]})
+            arkv_answers.append({"answers": data_sample["answers"], "all_classes": data_sample["all_classes"]})
+
+            if len(batch) == seqs_per_request or p_idx == len(data) - 1:
+                baseline_batch = model_cb_baseline.generate(
+                    batch, [generation_config] * len(batch)
+                )
+                arkv_batch = model_cb_arkv.generate(
+                    batch, [generation_config] * len(batch)
+                )
+                for i, (baseline_output, arkv_output) in enumerate(zip(baseline_batch, arkv_batch), start=p_idx-len(batch)+1):
+                    baseline_answers[i]["pred"] = post_process_pred(baseline_output.m_generation_ids[0], subset, model_name)
+                    arkv_answers[i]["pred"] = post_process_pred(arkv_output.m_generation_ids[0], subset, model_name)
+                batch.clear()
+
+    baseline_score = evaluate(baseline_answers, subset)
+    arkv_score = evaluate(arkv_answers, subset)
+
+    print(f"Baseline (SnapKV) score: {baseline_score}")
+    print(f"Adaptive RKV score: {arkv_score}")
+
+    assert arkv_score >= baseline_score, f"Adaptive RKV score ({arkv_score}) is worse than baseline ({baseline_score}) on {subset} dataset"
+
+    del model_cb_baseline
+    del model_cb_arkv
+    import gc
+    gc.collect()

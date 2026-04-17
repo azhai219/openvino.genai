@@ -1240,7 +1240,7 @@ private:
                 Sequence::CPtr sequence = running_sequences[seq_idx];
                 size_t global_sequence_id = sequence->get_id();
                 auto it = scheduler_output.m_adaptive_rkv_evictable_sizes.find(global_sequence_id);
-                if (it == scheduler_output.m_adaptive_rkv_evictable_sizes.end()) {
+                if (it == scheduler_output.m_adaptive_rkv_evictable_sizes.end() || it->second == 0) {
                     // Adaptive R-KV diversity calculation was not scheduled for this sequence
                     continue;
                 }

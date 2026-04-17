@@ -320,21 +320,13 @@ void init_continuous_batching_pipeline(py::module_& m) {
 
     py::class_<CacheEvictionConfig>(m, "CacheEvictionConfig", cache_eviction_config_docstring)
             .def(py::init<>([](const size_t start_size, size_t recent_size, size_t max_cache_size, AggregationMode aggregation_mode, bool apply_rotation,
-                            size_t snapkv_window_size, py::object kvcrush_config) {
-                if (kvcrush_config.is_none()) {
-                     return CacheEvictionConfig{start_size, recent_size, max_cache_size, aggregation_mode, apply_rotation, snapkv_window_size};
-                 } else {
-                     const auto& config_ref = kvcrush_config.cast<const KVCrushConfig&>();
-                     return CacheEvictionConfig{start_size,
-                                                recent_size,
-                                                max_cache_size,
-                                                aggregation_mode,
-                                                apply_rotation,
-                                                snapkv_window_size,
-                                                config_ref};
-                 } }),
+                            size_t snapkv_window_size, py::object kvcrush_config, py::object adaptive_rkv_config) {
+                KVCrushConfig crush_cfg = kvcrush_config.is_none() ? KVCrushConfig(0, KVCrushAnchorPointMode::RANDOM) : kvcrush_config.cast<const KVCrushConfig&>();
+                AdaptiveRKVConfig arkv_cfg = adaptive_rkv_config.is_none() ? AdaptiveRKVConfig() : adaptive_rkv_config.cast<const AdaptiveRKVConfig&>();
+                return CacheEvictionConfig{start_size, recent_size, max_cache_size, aggregation_mode, apply_rotation, snapkv_window_size, crush_cfg, arkv_cfg};
+                 }),
                  py::arg("start_size"), py::arg("recent_size"), py::arg("max_cache_size"), py::arg("aggregation_mode"), py::arg("apply_rotation") = false,
-                 py::arg("snapkv_window_size") = 8, py::arg("kvcrush_config") = py::none())
+                 py::arg("snapkv_window_size") = 8, py::arg("kvcrush_config") = py::none(), py::arg("adaptive_rkv_config") = py::none())
             .def_readwrite("aggregation_mode", &CacheEvictionConfig::aggregation_mode)
             .def_readwrite("apply_rotation", &CacheEvictionConfig::apply_rotation)
             .def_readwrite("snapkv_window_size", &CacheEvictionConfig::snapkv_window_size)
