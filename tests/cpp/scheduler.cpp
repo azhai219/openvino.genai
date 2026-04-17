@@ -24,7 +24,7 @@ void clear_finished_sequences(std::vector<SequenceGroup::Ptr>& requests) {
 std::shared_ptr<CacheManager> init_cache_manager(SchedulerConfig scheduler_config) {
     ov::Core core = ov::Core();
     size_t num_decoder_layers = 12;
-    ov::InferRequest request = core.compile_model(get_dummy_model(core, num_decoder_layers)).create_infer_request();
+    ov::InferRequest request = core.compile_model(get_dummy_model(core, num_decoder_layers), "CPU").create_infer_request();
     return std::make_shared<CacheManager>(request);
 }
 
@@ -1109,5 +1109,98 @@ TEST(TestScheduler, prefix_caching_embeddings_test) {
                 scheduler.free_sequence(seq->get_id());
             }
          }
+    }
+}
+
+TEST(TestScheduler, AdaptiveRKVPopulatesDiversityBlockSets) {
+    // Test that the scheduler populates m_adaptive_rkv_diversity_block_sets_for_each_layer_per_sequence
+    // when ADAPTIVE_RKV mode is active. This is the fix for compute_adaptive_rkv_diversity never being
+    // called because diversity block set indices were always zero-shaped.
+    //
+    // Setup: block_size=2, start=2, recent=2, max_cache=6 => evictable_size=2 (1 block)
+    // With num_kv_blocks=10, num_layers=12 (from init_cache_manager)
+    SchedulerConfig scheduler_config;
+    scheduler_config.max_num_batched_tokens = 32;
+    scheduler_config.num_kv_blocks = 10;
+    scheduler_config.dynamic_split_fuse = true;
+    scheduler_config.max_num_seqs = 5;
+    scheduler_config.use_cache_eviction = true;
+    scheduler_config.cache_eviction_config = ov::genai::CacheEvictionConfig(
+        2, 2, 6,
+        ov::genai::AggregationMode::ADAPTIVE_RKV,
+        /* apply_rotation = */ false,
+        /* snapkv_window_size = */ 0
+    );
+
+    // Create a sequence long enough to fill past max_cache_size and trigger eviction scheduling
+    // max_cache_size=6, block_size=2 => 3 blocks. We need >6 tokens to trigger evictable_size > 0.
+    // But eviction scheduling also requires: can_generate_tokens() && num_processed_tokens >= max_cache_size
+    // && num_cached_tokens % block_size == 0
+    // So we first do a prompt phase, then generate tokens until conditions are met.
+
+    // Prompt with 6 tokens (fills exactly max_cache_size = 3 blocks)
+    std::vector<uint64_t> tokens = {0, 1, 2, 3, 4, 5};
+    SequenceGroup::Ptr sequence_group = std::make_shared<SequenceGroup>(
+        0, ov::Tensor(ov::element::i64, {tokens.size()}, tokens.data()),
+        utils::get_greedy_config(), 2);
+    auto seq_id = (*sequence_group)[0]->get_id();
+    std::vector<SequenceGroup::Ptr> requests = {sequence_group};
+
+    Scheduler scheduler = Scheduler(2, init_cache_manager(scheduler_config), scheduler_config);
+
+    // Prompt phase schedule
+    auto out = scheduler.schedule(requests);
+
+    // After prompt: diversity block sets should be populated (ADAPTIVE_RKV is active)
+    // but evictable_size is 0 since we haven't exceeded max_cache_size yet in generation.
+    // The map should still be non-empty (contains entries with empty block vectors for each seq).
+    EXPECT_FALSE(out.m_adaptive_rkv_diversity_block_sets_for_each_layer_per_sequence.empty());
+
+    // Check that our seq_id exists in every layer's map
+    for (size_t layer = 0; layer < out.m_adaptive_rkv_diversity_block_sets_for_each_layer_per_sequence.size(); layer++) {
+        auto& layer_map = out.m_adaptive_rkv_diversity_block_sets_for_each_layer_per_sequence[layer];
+        EXPECT_NE(layer_map.find(seq_id), layer_map.end())
+            << "seq_id " << seq_id << " missing from diversity block sets at layer " << layer;
+    }
+
+    // During prompt phase, evictable_size should be 0 (can't generate yet)
+    EXPECT_EQ(out.m_adaptive_rkv_evictable_sizes[seq_id], 0u);
+
+    // Finish prompt iteration
+    for (auto& req : requests) {
+        req->finish_iteration();
+    }
+
+    // Generate tokens to exceed max_cache_size and trigger eviction scheduling.
+    // After prompt of 6 tokens (3 blocks), generate 2 more tokens (1 more block = 4 blocks total = 8 tokens).
+    // num_processed_tokens will be 8 > max_cache_size(6), num_cached_tokens=8 % block_size(2)==0,
+    // can_generate_tokens()=true => evictable_size should be non-zero.
+    for (int i = 0; i < 2; i++) {
+        out = scheduler.schedule(requests);
+        requests[0]->get_running_sequences()[0]->append_token(10 + i, 0.9);
+        requests[0]->finish_iteration();
+    }
+
+    // Now schedule again — this should have non-zero evictable_size
+    out = scheduler.schedule(requests);
+
+    // Check that diversity block sets are populated with actual block indices
+    ASSERT_FALSE(out.m_adaptive_rkv_diversity_block_sets_for_each_layer_per_sequence.empty());
+    size_t evictable_size = out.m_adaptive_rkv_evictable_sizes[seq_id];
+    EXPECT_GT(evictable_size, 0u) << "Expected non-zero evictable size after exceeding max_cache_size";
+
+    // When evictable_size > 0, the diversity block set should contain all logical blocks of the sequence
+    for (size_t layer = 0; layer < out.m_adaptive_rkv_diversity_block_sets_for_each_layer_per_sequence.size(); layer++) {
+        auto& layer_map = out.m_adaptive_rkv_diversity_block_sets_for_each_layer_per_sequence[layer];
+        ASSERT_NE(layer_map.find(seq_id), layer_map.end());
+        const auto& block_indices = layer_map.at(seq_id);
+        EXPECT_FALSE(block_indices.empty())
+            << "Expected non-empty diversity block indices when evictable_size > 0, at layer " << layer;
+
+        // Block indices should be sequential logical indices [0, 1, 2, ...]
+        for (size_t i = 0; i < block_indices.size(); i++) {
+            EXPECT_EQ(block_indices[i], i)
+                << "Expected sequential logical block index at position " << i << ", layer " << layer;
+        }
     }
 }
